@@ -1,5 +1,5 @@
 import React, { useRef } from 'react';
-import { ExpenseItem, ExpenseType } from '../types';
+import { ExpenseItem, ExpenseType } from '../types.ts';
 
 interface ExpenseRowProps {
   item: ExpenseItem;

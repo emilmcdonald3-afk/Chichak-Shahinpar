@@ -1,10 +1,13 @@
-import React, { useState, useMemo, useCallback } from 'react';
-import jsPDF from 'jspdf';
-import html2canvas from 'html2canvas';
-import { ExpenseItem, Payee, ExpenseType } from '../types';
-import ExpenseRow from './ExpenseRow';
+import React, { useState, useMemo, useCallback, useRef } from 'react';
+import { ExpenseItem, Payee, ExpenseType } from '../types.ts';
+import ExpenseRow from './ExpenseRow.tsx';
+import * as XLSX from 'xlsx';
 
-const PettyCashForm: React.FC = () => {
+interface PettyCashFormProps {
+  selectedCompany: string;
+}
+
+const PettyCashForm: React.FC<PettyCashFormProps> = ({ selectedCompany }) => {
   const [payees, setPayees] = useState<Payee[]>([
     { id: crypto.randomUUID(), name: '' },
   ]);
@@ -14,7 +17,9 @@ const PettyCashForm: React.FC = () => {
   const [expenses, setExpenses] = useState<ExpenseItem[]>([
     { id: crypto.randomUUID(), date: '', description: '', amount: 0, type: 'cost', attachment: null },
   ]);
-  const [isDownloading, setIsDownloading] = useState(false);
+  const [isGeneratingExcel, setIsGeneratingExcel] = useState<boolean>(false);
+  const actionButtonsRef = useRef<HTMLDivElement>(null);
+
 
   const handleAddPayee = useCallback(() => {
     setPayees(prev => [...prev, { id: crypto.randomUUID(), name: '' }]);
@@ -79,55 +84,159 @@ const PettyCashForm: React.FC = () => {
   const handlePrint = () => {
     window.print();
   };
-
-  const handleDownload = async () => {
-    const formElement = document.getElementById('petty-cash-form');
-    if (!formElement) return;
-
-    setIsDownloading(true);
+  
+  const handleDownloadExcel = () => {
+    setIsGeneratingExcel(true);
     try {
-        const canvas = await html2canvas(formElement, {
-            scale: 2,
-            useCORS: true,
-        });
-        
-        const imgData = canvas.toDataURL('image/png');
-        const pdf = new jsPDF({
-            orientation: 'p',
-            unit: 'mm',
-            format: 'a4',
-        });
+        // 1. Data Preparation
+        const companyTitle = [selectedCompany];
+        const formTitle = ["فرم تنخواه گردان"];
+        const headerInfo = [
+            ["شماره تنخواه:", pettyCashNumber],
+            ["در وجه:", payees.map(p => p.name).join(', ')],
+            ["تاریخ شارژ تنخواه:", initialAmountDate ? new Date(initialAmountDate).toLocaleDateString('fa-IR') : ''],
+            ["مبلغ تنخواه اولیه (ریال):", initialAmount],
+        ];
+        const tableHeader = ["ردیف", "تاریخ", "شرح هزینه", "نوع تراکنش", "مبلغ (ریال)", "سند پیوست"];
+        const tableBody = expenses.map((item, index) => [
+            index + 1,
+            item.date ? new Date(item.date).toLocaleDateString('fa-IR') : '',
+            item.description,
+            item.type === 'cost' ? 'هزینه' : 'برگشت وجه',
+            item.amount,
+            item.attachment ? 'دارد' : 'ندارد'
+        ]);
+        const footer = [
+            [],
+            ['', '', '', '', 'جمع کل هزینه‌ها:', totalAmount],
+            ['', '', '', '', 'مانده تنخواه:', remainingBalance],
+        ];
 
-        const pdfWidth = pdf.internal.pageSize.getWidth();
-        const imgHeight = canvas.height * pdfWidth / canvas.width;
-        let heightLeft = imgHeight;
-        let position = 0;
+        const worksheetData = [
+            companyTitle,
+            formTitle,
+            [],
+            ...headerInfo, 
+            [], 
+            tableHeader, 
+            ...tableBody, 
+            ...footer
+        ];
 
-        pdf.addImage(imgData, 'PNG', 0, position, pdfWidth, imgHeight);
-        heightLeft -= pdf.internal.pageSize.getHeight();
+        // 2. Create worksheet from data
+        const ws = XLSX.utils.aoa_to_sheet(worksheetData);
 
-        while (heightLeft > 0) {
-            position = heightLeft - imgHeight;
-            pdf.addPage();
-            pdf.addImage(imgData, 'PNG', 0, position, pdfWidth, imgHeight);
-            heightLeft -= pdf.internal.pageSize.getHeight();
+        // 3. Styling and Formatting
+        // Merge and style titles
+        ws['!merges'] = [
+          { s: { r: 0, c: 0 }, e: { r: 0, c: 5 } },
+          { s: { r: 1, c: 0 }, e: { r: 1, c: 5 } }
+        ];
+
+        if (!ws['A1']) ws['A1'] = { t: 's', v: companyTitle[0] };
+        ws['A1'].s = {
+            font: { sz: 18, bold: true },
+            alignment: { horizontal: "center", vertical: "center" }
+        };
+        if (!ws['A2']) ws['A2'] = { t: 's', v: formTitle[0] };
+        ws['A2'].s = {
+            font: { sz: 14, bold: true },
+            alignment: { horizontal: "center", vertical: "center" }
+        };
+
+        // Style header info labels (A4:A7)
+        for (let i = 3; i <= 6; i++) {
+            const cellRef = XLSX.utils.encode_cell({ r: i, c: 0 });
+            if (ws[cellRef]) ws[cellRef].s = { font: { bold: true } };
         }
+
+        // Style table header
+        const tableHeaderRow = 8;
+        tableHeader.forEach((_, colIndex) => {
+            const cellRef = XLSX.utils.encode_cell({ r: tableHeaderRow, c: colIndex });
+            if (ws[cellRef]) {
+                ws[cellRef].s = {
+                    font: { bold: true, color: { rgb: "FFFFFF" } },
+                    fill: { fgColor: { rgb: "4F81BD" } }, // Blue background
+                    alignment: { horizontal: "center" },
+                    border: {
+                        top: { style: "thin" }, bottom: { style: "thin" },
+                        left: { style: "thin" }, right: { style: "thin" }
+                    }
+                };
+            }
+        });
         
-        pdf.save('petty-cash-form.pdf');
-    } catch (error) {
-        console.error("Error generating PDF:", error);
-        alert("متاسفانه در تولید فایل PDF خطایی رخ داد.");
+        // Format number cells and style footer
+        const numberFormat = '#,##0';
+        const initialAmountCellRef = XLSX.utils.encode_cell({ r: 6, c: 1 });
+        if (ws[initialAmountCellRef]) {
+            ws[initialAmountCellRef].t = 'n';
+            ws[initialAmountCellRef].z = numberFormat;
+        }
+        tableBody.forEach((row, rowIndex) => {
+            const amountCellRef = XLSX.utils.encode_cell({ r: tableHeaderRow + 1 + rowIndex, c: 4 });
+            if (ws[amountCellRef]) {
+                ws[amountCellRef].t = 'n';
+                ws[amountCellRef].z = numberFormat;
+            }
+        });
+        
+        const footerStartRow = tableHeaderRow + tableBody.length + 2;
+        const totalLabelRef = XLSX.utils.encode_cell({ r: footerStartRow, c: 4 });
+        const balanceLabelRef = XLSX.utils.encode_cell({ r: footerStartRow + 1, c: 4 });
+        const totalValueRef = XLSX.utils.encode_cell({ r: footerStartRow, c: 5 });
+        const balanceValueRef = XLSX.utils.encode_cell({ r: footerStartRow + 1, c: 5 });
+
+        if(ws[totalLabelRef]) ws[totalLabelRef].s = { font: { bold: true } };
+        if(ws[balanceLabelRef]) ws[balanceLabelRef].s = { font: { bold: true } };
+
+        if(ws[totalValueRef]) {
+            ws[totalValueRef].t = 'n';
+            ws[totalValueRef].z = numberFormat;
+            ws[totalValueRef].s = { font: { bold: true } };
+        }
+         if(ws[balanceValueRef]) {
+            ws[balanceValueRef].t = 'n';
+            ws[balanceValueRef].z = numberFormat;
+            ws[balanceValueRef].s = { font: { bold: true } };
+        }
+
+        // 4. Set column widths
+        ws['!cols'] = [
+            { wch: 8 },  // ردیف
+            { wch: 15 }, // تاریخ
+            { wch: 45 }, // شرح هزینه
+            { wch: 18 }, // نوع تراکنش
+            { wch: 22 }, // مبلغ (ریال)
+            { wch: 18 }  // سند پیوست
+        ];
+
+        // 5. Create workbook and set RTL view
+        const wb = XLSX.utils.book_new();
+        wb.Workbook = { Views: [{ RTL: true }] };
+        XLSX.utils.book_append_sheet(wb, ws, "فرم تنخواه");
+
+        // 6. Write file
+        const fileName = `فرم-تنخواه-${pettyCashNumber || 'جدید'}.xlsx`;
+        XLSX.writeFile(wb, fileName);
+
+    } catch(e) {
+        console.error("Error generating Excel file:", e);
+        alert('خطا در ایجاد فایل Excel. لطفا دوباره تلاش کنید.');
     } finally {
-        setIsDownloading(false);
+        setIsGeneratingExcel(false);
     }
   };
-  
+
+
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     const payeeNames = payees.map(p => p.name).join(', ');
     const expenseData = expenses.map(e => ({...e, attachment: e.attachment?.name}));
-    alert(`فرم با موفقیت ثبت شد!\nشماره تنخواه: ${pettyCashNumber}\nپرداخت به: ${payeeNames}\nتاریخ شارژ تنخواه: ${new Date(initialAmountDate).toLocaleDateString('fa-IR')}\nمبلغ اولیه تنخواه: ${initialAmount.toLocaleString('fa-IR')} ریال\nمجموع هزینه: ${totalAmount.toLocaleString('fa-IR')} ریال\nمانده تنخواه: ${remainingBalance.toLocaleString('fa-IR')} ریال`);
+    alert(`فرم با موفقیت ثبت شد!\nشرکت: ${selectedCompany}\nشماره تنخواه: ${pettyCashNumber}\nپرداخت به: ${payeeNames}\nتاریخ شارژ تنخواه: ${new Date(initialAmountDate).toLocaleDateString('fa-IR')}\nمبلغ اولیه تنخواه: ${initialAmount.toLocaleString('fa-IR')} ریال\nمجموع هزینه: ${totalAmount.toLocaleString('fa-IR')} ریال\nمانده تنخواه: ${remainingBalance.toLocaleString('fa-IR')} ریال`);
     console.log({
+        selectedCompany,
         pettyCashNumber,
         payees,
         initialAmountDate,
@@ -140,6 +249,19 @@ const PettyCashForm: React.FC = () => {
 
   return (
     <div id="petty-cash-form" className="max-w-4xl mx-auto bg-white dark:bg-gray-800 rounded-xl shadow-lg p-6 sm:p-8 print:shadow-none print:rounded-none">
+      {/* --- Print Header --- */}
+      <div className="hidden print:block mb-8 border-b pb-4">
+        <div className="flex items-center justify-between">
+            <div className="flex-grow">
+              <h1 className="text-2xl font-bold text-slate-800">
+                {selectedCompany}
+              </h1>
+              <p className="text-xl text-slate-600 font-semibold">
+                فرم تنخواه گردان داخلی
+              </p>
+            </div>
+        </div>
+      </div>
       <form onSubmit={handleSubmit}>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
           <div>
@@ -289,30 +411,35 @@ const PettyCashForm: React.FC = () => {
               </div>
           </div>
 
-          <div className="w-full sm:w-auto flex flex-col sm:flex-row-reverse gap-3 print:hidden">
+          <div ref={actionButtonsRef} className="w-full sm:w-auto flex flex-col sm:flex-row-reverse gap-3 print:hidden">
             <button
               type="submit"
               className="w-full sm:w-auto px-6 py-3 bg-blue-600 text-white font-bold rounded-lg shadow-md hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 transition-transform transform hover:scale-105"
             >
               ثبت و ارسال فرم
             </button>
-            <button
+             <button
               type="button"
-              onClick={handleDownload}
-              disabled={isDownloading}
-              className="w-full sm:w-auto px-4 py-2 bg-white dark:bg-gray-700 border border-slate-300 dark:border-gray-600 text-slate-700 dark:text-slate-200 font-medium rounded-lg shadow-sm hover:bg-slate-50 dark:hover:bg-gray-600 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 transition-colors flex items-center justify-center gap-2 disabled:opacity-50"
+              onClick={handleDownloadExcel}
+              disabled={isGeneratingExcel}
+              className="w-full sm:w-auto px-4 py-2 bg-green-100 dark:bg-green-900/50 border border-transparent text-green-700 dark:text-green-300 font-medium rounded-lg shadow-sm hover:bg-green-200 dark:hover:bg-green-900 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-green-500 transition-colors flex items-center justify-center gap-2 disabled:opacity-60 disabled:cursor-wait"
             >
-              {isDownloading ? (
-                <svg className="animate-spin -ml-1 mr-3 h-5 w-5" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                </svg>
+              {isGeneratingExcel ? (
+                <>
+                  <svg className="animate-spin -ml-1 mr-2 h-5 w-5" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                  </svg>
+                  <span>در حال ساخت...</span>
+                </>
               ) : (
-                <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
-                  <path fillRule="evenodd" d="M3 17a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm3.293-7.707a1 1 0 011.414 0L9 10.586V3a1 1 0 112 0v7.586l1.293-1.293a1 1 0 111.414 1.414l-3 3a1 1 0 01-1.414 0l-3-3a1 1 0 010-1.414z" clipRule="evenodd" />
-                </svg>
+                <>
+                  <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+                    <path fillRule="evenodd" d="M5 4a3 3 0 00-3 3v6a3 3 0 003 3h10a3 3 0 003-3V7a3 3 0 00-3-3H5zm0 2h10a1 1 0 011 1v6a1 1 0 01-1 1H5a1 1 0 01-1-1V7a1 1 0 011-1zM5 8h2v2H5V8zm4 0h2v2H9V8zm4 0h2v2h-2V8z" clipRule="evenodd" />
+                  </svg>
+                  <span>دانلود Excel</span>
+                </>
               )}
-              <span>{isDownloading ? 'در حال آماده سازی...' : 'دانلود PDF'}</span>
             </button>
             <button
               type="button"
